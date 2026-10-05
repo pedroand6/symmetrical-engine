@@ -7,6 +7,8 @@
 
 #define TRUE 1
 #define FALSE 0
+#define SPHERE 0
+#define PLANE 1
 
 // Window dimensions
 const int WIDTH = 1280;
@@ -120,47 +122,49 @@ void intersect_sphere(const struct Sphere* sphere, const struct Vector* ray, flo
     free(scaled_dir);
 }
 
+int trace_ray(const struct Objects* objects, int object_type, const struct Vector* ray, float* start_point, float* intersection_point, float* intersection_length, int* object_index){
+    /* Trace the ray and output the first/shortest hit */
+
+    int object_count = (object_type == SPHERE) ? objects->sphere_count : objects->plane_count;
+    int hit_object = FALSE;
+
+    for(int i = 0; i < object_count; ++i){
+        float new_intersection_point[3];
+        if (object_type == SPHERE){
+            intersect_sphere(&objects->sphere[i], ray, start_point, new_intersection_point);
+        }
+        else{
+            intersect_plane(&objects->plane[i], ray, start_point, new_intersection_point);
+        }
+
+        if(!isnan(new_intersection_point[0])){ // Got the object
+            float* to_hit = vector_subtract(new_intersection_point, start_point, 3);
+            float new_intersection_length = vector_length(to_hit, 3);
+            free(to_hit);
+            if(*intersection_length > new_intersection_length){
+                // Update the intersection point and length if this sphere is closer than the previous one
+                memcpy(intersection_point, new_intersection_point, 3 * sizeof(float));
+                *intersection_length = new_intersection_length;
+                *object_index = i;
+                hit_object = TRUE;
+            }
+        }
+    }
+
+    if(hit_object == TRUE){
+        return 1;
+    }
+
+    return 0;
+}
+
 void render_pixel(const struct Vector* camera, const struct Objects* objects, float* light_dir, float* start_point, float* pixel_color){
-    int hit_plane = FALSE;
     int object_index = -1;
 
     float intersection_point[3] = {NAN, NAN, NAN};
     float intersection_length = INFINITY;
-    for(int i = 0; i < objects->sphere_count; ++i){
-        float new_intersection_point[3];
-        intersect_sphere(&objects->sphere[i], camera, start_point, new_intersection_point);
-
-        if(!isnan(new_intersection_point[0])){ // Got the sphere
-            float* to_hit = vector_subtract(new_intersection_point, start_point, 3);
-            float new_intersection_length = vector_length(to_hit, 3);
-            free(to_hit);
-            if(intersection_length > new_intersection_length){
-                // Update the intersection point and length if this sphere is closer than the previous one
-                memcpy(intersection_point, new_intersection_point, 3 * sizeof(float));
-                intersection_length = new_intersection_length;
-                object_index = i;
-            }
-        }
-    }
-
-    for(int i = 0; i < objects->plane_count; ++i){
-        float new_intersection_point[3];
-        intersect_plane(&objects->plane[i], camera, start_point, new_intersection_point);
-
-        if(!isnan(new_intersection_point[0])){ // Got the plane
-            float* to_hit = vector_subtract(new_intersection_point, start_point, 3);
-            float new_intersection_length = vector_length(to_hit, 3);
-            free(to_hit);
-            if(intersection_length > new_intersection_length){
-                // Update the intersection point and length if this plane is closer than the previous plane or sphere one
-                memcpy(intersection_point, new_intersection_point, 3 * sizeof(float));
-                intersection_length = new_intersection_length;
-
-                hit_plane = TRUE;
-                object_index = i;
-            }
-        }
-    }
+    trace_ray(objects, SPHERE, camera, start_point, intersection_point, &intersection_length, &object_index);
+    int hit_plane = trace_ray(objects, PLANE, camera, start_point, intersection_point, &intersection_length, &object_index);
 
     if(!isnan(intersection_point[0])){
         // Calculate the normal at the intersection point
@@ -188,22 +192,12 @@ void render_pixel(const struct Vector* camera, const struct Objects* objects, fl
             shadow_start[k] = intersection_point[k] + normal[k] * 1e-3f;
         }
 
-        int in_shadow = FALSE;
-        for(int i = 0; i < objects->sphere_count && !in_shadow; ++i){
-            float blocker[3];
-            intersect_sphere(&objects->sphere[i], &shadow_ray, shadow_start, blocker);
-            if(!isnan(blocker[0])){
-                in_shadow = TRUE;
-            }
-        }
+        float blocker[3];
+        float intersection_length = INFINITY;
+        int object_index = -1;
 
-        for(int i = 0; i < objects->plane_count && !in_shadow; ++i){
-            float blocker[3];
-            intersect_plane(&objects->plane[i], &shadow_ray, shadow_start, blocker);
-            if(!isnan(blocker[0])){
-                in_shadow = TRUE;
-            }
-        }
+        int in_shadow = trace_ray(objects, PLANE, &shadow_ray, shadow_start, blocker, &intersection_length, &object_index);
+        in_shadow |= trace_ray(objects, SPHERE, &shadow_ray, shadow_start, blocker, &intersection_length, &object_index);
 
         // Ambient term so shadowed areas are not pure black
         const float ambient = 0.15f;
@@ -251,16 +245,18 @@ int main(void){
 
     // Two spheres resting on the floor
     struct Sphere spheres[] = {
-        { .radius = 0.5f,  .position = {-0.82f, -0.5f,  3.3f}, .color = {0.85f, 0.75f, 0.60f} }, // left
-        { .radius = 0.53f, .position = { 0.82f, -0.47f, 3.1f}, .color = {0.85f, 0.75f, 0.60f} }, // right
+        { .radius = 0.5f,  .position = {-0.82f, -0.5f,  3.3f}, .color = {0.85f, 0.25f, 0.30f} }, // left
+        { .radius = 0.53f, .position = { 0.82f, -0.47f, 3.1f}, .color = {0.3f, 0.4f, 0.80f} }, // right
+        { .radius = 0.53f, .position = { 0.0f, 1.2f, 3.0f}, .color = {1.0f, 1.0f, 1.0f} }, // lamp on top
     };
 
-    // an open box
+    // closed box
     struct Plane planes[] = {
         { .normal = { 0.0f, 1.0f,  0.0f}, .point = { 0.0f, -1.0f, 0.0f}, .color = {0.80f, 0.70f, 0.55f} }, // floor
         { .normal = { 0.0f, 0.0f, -1.0f}, .point = { 0.0f,  0.0f, 4.0f}, .color = {0.80f, 0.70f, 0.55f} }, // back wall
         { .normal = { 1.0f, 0.0f,  0.0f}, .point = {-2.0f,  0.0f, 0.0f}, .color = {0.65f, 0.12f, 0.10f} }, // left wall
         { .normal = {-1.0f, 0.0f,  0.0f}, .point = { 2.0f,  0.0f, 0.0f}, .color = {0.15f, 0.15f, 0.60f} }, // right wall
+        { .normal = { 0.0f, -1.0f,  0.0f}, .point = { 0.0f, 1.0f, 0.0f}, .color = {0.80f, 0.70f, 0.55f} }, // roof
     };
 
     struct Objects objects;
