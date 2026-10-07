@@ -11,7 +11,7 @@ float* vector_scale(const float* a, float scalar, size_t size);
 
 float vector_dot(const float* a, const float* b, size_t size);
 
-float* vector_cross(const float* a, const float* b);
+void vector_cross(const float* a, const float* b, float* result);
 
 float* vector_normalize(const float* a, size_t size);
 

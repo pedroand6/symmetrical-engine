@@ -34,13 +34,10 @@ float vector_dot(const float* a, const float* b, size_t size) {
     return result;
 }
 
-float* vector_cross(const float* a, const float* b) {
-    float* result = malloc(3 * sizeof(float));
+void vector_cross(const float* a, const float* b, float* result) {
     result[0] = a[1] * b[2] - a[2] * b[1];
     result[1] = a[2] * b[0] - a[0] * b[2];
     result[2] = a[0] * b[1] - a[1] * b[0];
-
-    return result;
 }
 
 float vector_length(const float* a, size_t size) {

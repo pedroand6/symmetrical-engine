@@ -7,25 +7,37 @@
 
 #define TRUE 1
 #define FALSE 0
+
 #define SPHERE 0
 #define PLANE 1
+
+#define SAMPLES 64
+#define MAX_DEPTH 8
 
 // Window dimensions
 const int WIDTH = 1280;
 const int HEIGHT = 720;
 const float aspect = (float)WIDTH / (float)HEIGHT;
 
+struct Object{
+    float color[3];
+    float emission[3];
+    float albedo;
+    int obj_type;
+    int emissive;
+};
+
 struct Plane{
+    struct Object object;
     float normal[3];
     float point[3];
-    float color[3];
 };
 
 // Sphere model data struct
 struct Sphere{
+    struct Object object;
     float radius;
     float position[3];
-    float color[3];
 };
 
 // Scene objects struct
@@ -158,14 +170,14 @@ int trace_ray(const struct Objects* objects, int object_type, const struct Vecto
     return 0;
 }
 
-void render_pixel(const struct Vector* camera, const struct Objects* objects, float* light_dir, float* start_point, float* pixel_color){
+struct Object* render_ray(struct Vector* camera, const struct Objects* objects, float* light_dir, float* start_point, float* ray_color, float* intersection_point){
     int object_index = -1;
+    struct Object* hit_obj;
 
-    float intersection_point[3] = {NAN, NAN, NAN};
     float intersection_length = INFINITY;
     trace_ray(objects, SPHERE, camera, start_point, intersection_point, &intersection_length, &object_index);
     int hit_plane = trace_ray(objects, PLANE, camera, start_point, intersection_point, &intersection_length, &object_index);
-
+    
     if(!isnan(intersection_point[0])){
         // Calculate the normal at the intersection point
         float* normal;
@@ -176,11 +188,21 @@ void render_pixel(const struct Vector* camera, const struct Objects* objects, fl
             float* to_surface = vector_subtract(intersection_point, objects->sphere[object_index].position, 3);
             normal = vector_normalize(to_surface, 3);
             free(to_surface);
-            color = objects->sphere[object_index].color;
+            
+            hit_obj = &objects->sphere[object_index].object;
+            color = hit_obj->color;
         }
         else{
             normal = vector_normalize(objects->plane[object_index].normal, 3);
-            color = objects->plane[object_index].color;
+
+            hit_obj = &objects->plane[object_index].object;
+            color = hit_obj->color;
+        }
+
+        if(hit_obj->emissive == TRUE){
+            memcpy(ray_color, hit_obj->emission, 3 * sizeof(float));
+            free(normal);
+            return hit_obj;
         }
 
         // shadow ray start slightly off the surface and look for an object between the point and the light
@@ -197,33 +219,161 @@ void render_pixel(const struct Vector* camera, const struct Objects* objects, fl
         int object_index = -1;
 
         int in_shadow = trace_ray(objects, PLANE, &shadow_ray, shadow_start, blocker, &intersection_length, &object_index);
+        // Take spheres into account the same way as planes
         in_shadow |= trace_ray(objects, SPHERE, &shadow_ray, shadow_start, blocker, &intersection_length, &object_index);
 
-        // Ambient term so shadowed areas are not pure black
+        // Ambient makes the shadow not be only black
         const float ambient = 0.15f;
         for(int k = 0; k < 3; ++k){
-            pixel_color[k] = color[k] * ambient;
+            ray_color[k] = color[k] * ambient;
         }
 
         if(in_shadow == FALSE){
             float* lambert_color = lambertian(light_dir, normal, color);
             for(int k = 0; k < 3; ++k){
-                pixel_color[k] += lambert_color[k] * (1.0f - ambient);
+                ray_color[k] += lambert_color[k] * (1.0f - ambient);
             }
             free(lambert_color);
         }
 
         free(normal);
-    } else {
+
+        return hit_obj;
+    } 
+    else {
         // if hits nothing, gets a sky gradient
         float t = fmaxf(camera->direction[1], 0.0f);
         float horizon[3] = {0.90f, 0.93f, 0.97f};
         float zenith[3] = {0.40f, 0.60f, 0.90f};
         for(int k = 0; k < 3; ++k){
-            pixel_color[k] = horizon[k] * (1.0f - t) + zenith[k] * t;
+            ray_color[k] = horizon[k] * (1.0f - t) + zenith[k] * t;
         }
+
+        return NULL;
     }
 
+}
+
+float* localToGlobal(float* localV, float* normal) {
+    /* Transforms the local vector to match a normal vector in global space */
+    float tangent[3], bitangent[3];
+
+    if (fabsf(normal[2]) > 0.999f) {
+        // if normal points to close to -z
+        tangent[0] = 1.0f; 
+        tangent[1] = 0.0f; 
+        tangent[2] = 0.0f;
+    } else {
+        // perpendicular vector to normal (rotates 90º)
+        float invLen = 1.0f / sqrtf(normal[0] * normal[0] + normal[1] * normal[1]);
+        tangent[0] = -normal[1] * invLen;
+        tangent[1] = normal[0] * invLen;
+        tangent[2] = 0.0f;
+    }
+
+    vector_cross(normal, tangent, bitangent);
+
+    // global = x * tangent + y * bitangent + z * normal
+    float* globalV = malloc(sizeof(float) * 3);
+    for (int k = 0; k < 3; ++k)
+        globalV[k] = localV[0] * tangent[k] + localV[1] * bitangent[k] + localV[2] * normal[k];
+    return globalV;
+}
+
+float* cosine_sample_hemisphere(float a, float b){
+    /* Calculate the cosine sample hemisphere direction */
+
+    float theta = acos(sqrt(a));
+    float phi = 2.0 * M_PI * b;
+
+    float* vector = malloc(3 * sizeof(float));
+    vector[0] = sinf(theta) * cosf(phi);
+    vector[1] = sinf(theta) * sinf(phi);
+    vector[2] = cosf(theta);
+
+    return vector;
+}
+
+void render_pixel(struct Vector* camera, const struct Objects* objects, float* light_dir, float* start_point, float* pixel_color){
+    /* Render a single pixel by tracing the ray from the camera through the pixel */
+
+    // Ray loop
+    float throughput[3] = { 1.0f, 1.0f, 1.0f };
+    float final_color[3] = {0.0f, 0.0f, 0.0f };
+    struct Vector ray = *camera;
+    float* start_ray = start_point;
+
+    int depth = 0;
+    while(depth < MAX_DEPTH){
+        // ---------- Get the color for the hit ---------- 
+        float intersection_point[3] = {NAN, NAN, NAN};
+        float ray_color[3] = {0.0f, 0.0f, 0.0f};
+        struct Object* hit_obj = render_ray(&ray, objects, light_dir, start_ray, ray_color, intersection_point);
+        
+        for (int i = 0; i < 3; ++i){
+            final_color[i] += throughput[i] * ray_color[i];
+        }
+
+        if(!hit_obj || hit_obj->emissive == TRUE){ 
+            break;
+        }
+
+        // ---------- Get the next ray direction ---------- 
+        // Get the normal based on the type of object
+        float normal[3];
+        if(hit_obj->obj_type == PLANE){
+            struct Plane obj = *(struct Plane*) hit_obj; // go to the object address (same of plane address)
+            memcpy(normal, obj.normal, sizeof(normal));
+        }
+        else {
+            struct Sphere obj = *(struct Sphere*) hit_obj;
+            float* to_surface = vector_subtract(intersection_point, obj.position, 3);
+            float* n = vector_normalize(to_surface, 3);
+            memcpy(normal, n, sizeof(normal));
+            free(to_surface);
+            free(n);
+        }
+
+        // Sample from cosine weighted
+        float r1 = (float)rand() / RAND_MAX;
+        float r2 = (float)rand() / RAND_MAX;
+        float* local_dir = cosine_sample_hemisphere(r1, r2);
+        float* global_dir = localToGlobal(local_dir, normal);
+
+        for (int i = 0; i < 3; ++i)
+            throughput[i] *= hit_obj->albedo * hit_obj->color[i];
+
+        for(int i = 0; i < 3; ++i){
+            ray.direction[i] = global_dir[i];
+            ray.position[i] = intersection_point[i] + normal[i] * 1e-3;
+        }
+
+        start_ray = ray.position;
+
+        free(local_dir);
+        free(global_dir);
+
+        // Russian roulette after 2 bounce
+        if (depth >= 2) {
+            float prob = fmaxf(throughput[0], fmaxf(throughput[1], throughput[2]));
+            if (prob > 0.95f)
+                prob = 0.95f;
+
+            if ((float)rand() / RAND_MAX > prob) 
+                break;
+
+            // Rays that survived become weaker
+            for (int i = 0; i < 3; ++i) 
+                throughput[i] /= prob;
+        }
+
+        depth++;
+    }
+
+    for(int k = 0; k < 3; ++k){
+        pixel_color[k] = final_color[k];
+        if(pixel_color[k] > 1.0f){ pixel_color[k] = 1.0f; }
+    }
 }
 
 int main(void){
@@ -235,9 +385,13 @@ int main(void){
 
     // Camera vectors orientation
     float world_up[3] = {0.0f, 1.0f, 0.0f};
-    float* right = vector_cross(world_up, camera.direction);
+    float* right = malloc(sizeof(float) * 3);
+    vector_cross(world_up, camera.direction, right);
+
     float* right_one = vector_normalize(right, 3);
-    float* up = vector_cross(camera.direction, right_one);
+    float* up = malloc(sizeof(float) * 3);
+    vector_cross(camera.direction, right_one, up);
+
     free(right);
 
     // camera FOV
@@ -245,18 +399,19 @@ int main(void){
 
     // Two spheres resting on the floor
     struct Sphere spheres[] = {
-        { .radius = 0.5f,  .position = {-0.82f, -0.5f,  3.3f}, .color = {0.85f, 0.25f, 0.30f} }, // left
-        { .radius = 0.53f, .position = { 0.82f, -0.47f, 3.1f}, .color = {0.3f, 0.4f, 0.80f} }, // right
-        { .radius = 0.53f, .position = { 0.0f, 1.2f, 3.0f}, .color = {1.0f, 1.0f, 1.0f} }, // lamp on top
+        { .radius = 0.5f,  .position = {-0.82f, -0.5f,  3.3f}, .object = {.color = {0.3f, 0.4f, 0.80f}, .albedo = 0.7f, .obj_type = SPHERE, .emissive = FALSE} }, // left - blue
+        { .radius = 0.53f, .position = { 0.82f, -0.47f, 3.1f}, .object = {.color = {0.85f, 0.25f, 0.30f}, .albedo = 0.7f, .obj_type = SPHERE, .emissive = FALSE} }, // right - red
+        { .radius = 0.53f, .position = { 0.0f, 1.2f, 3.0f}, .object = {.color = {1.0f, 1.0f, 1.0f}, .albedo = 0.7f, .obj_type = SPHERE, .emission = {8.0f, 8.0f, 8.0f}, .emissive = TRUE} }, // lamp on top
     };
 
     // closed box
     struct Plane planes[] = {
-        { .normal = { 0.0f, 1.0f,  0.0f}, .point = { 0.0f, -1.0f, 0.0f}, .color = {0.80f, 0.70f, 0.55f} }, // floor
-        { .normal = { 0.0f, 0.0f, -1.0f}, .point = { 0.0f,  0.0f, 4.0f}, .color = {0.80f, 0.70f, 0.55f} }, // back wall
-        { .normal = { 1.0f, 0.0f,  0.0f}, .point = {-2.0f,  0.0f, 0.0f}, .color = {0.65f, 0.12f, 0.10f} }, // left wall
-        { .normal = {-1.0f, 0.0f,  0.0f}, .point = { 2.0f,  0.0f, 0.0f}, .color = {0.15f, 0.15f, 0.60f} }, // right wall
-        { .normal = { 0.0f, -1.0f,  0.0f}, .point = { 0.0f, 1.0f, 0.0f}, .color = {0.80f, 0.70f, 0.55f} }, // roof
+        { .normal = { 0.0f, 1.0f,  0.0f}, .point = { 0.0f, -1.0f,  0.0f}, .object = {.color = {0.80f, 0.70f, 0.55f}, .albedo = 0.7f, .obj_type = PLANE, .emissive = FALSE} }, // floor
+        { .normal = { 0.0f, 0.0f, -1.0f}, .point = { 0.0f,  0.0f,  4.0f}, .object = {.color = {0.80f, 0.70f, 0.55f}, .albedo = 0.7f, .obj_type = PLANE, .emissive = FALSE} }, // back wall
+        { .normal = { 1.0f, 0.0f,  0.0f}, .point = {-2.0f,  0.0f,  0.0f}, .object = {.color = {0.65f, 0.12f, 0.10f}, .albedo = 0.7f, .obj_type = PLANE, .emissive = FALSE} }, // left wall
+        { .normal = {-1.0f, 0.0f,  0.0f}, .point = { 2.0f,  0.0f,  0.0f}, .object = {.color = {0.15f, 0.15f, 0.60f}, .albedo = 0.7f, .obj_type = PLANE, .emissive = FALSE} }, // right wall
+        { .normal = { 0.0f, 0.0f,  1.0f}, .point = { 0.0f,  0.0f, -4.0f}, .object = {.color = {0.80f, 0.70f, 0.55f}, .albedo = 0.7f, .obj_type = PLANE, .emissive = FALSE} }, // front wall
+        { .normal = { 0.0f, -1.0f, 0.0f}, .point = { 0.0f,  1.0f,  0.0f}, .object = {.color = {0.80f, 0.70f, 0.55f}, .albedo = 0.7f, .obj_type = PLANE, .emissive = FALSE} }, // roof
     };
 
     struct Objects objects;
@@ -274,8 +429,8 @@ int main(void){
     for(int j = 0; j < HEIGHT; ++j){
         for(int i = 0; i < WIDTH; ++i){
             // the ray starts at the camera and points through its pixel on the viewport - perspective projection
-            float u = ((float)i / WIDTH  - 0.5f) * 2.0f * viewport_half * aspect;
-            float v = ((float)j / HEIGHT - 0.5f) * 2.0f * viewport_half;
+            float u = ((i + (float)rand()/RAND_MAX) / WIDTH - 0.5f) * 2.0f * viewport_half * aspect;
+            float v = ((j + (float)rand()/RAND_MAX) / HEIGHT - 0.5f) * 2.0f * viewport_half;
 
             float pixel_dir[3];
             float* u_right = vector_scale(right_one, u, 3);
@@ -297,8 +452,14 @@ int main(void){
             float start_point[3];
             memcpy(start_point, camera.position, 3 * sizeof(float));
 
+            float accum[3] = {0.0f, 0.0f, 0.0f};
+            for (int s = 0; s < SAMPLES; ++s) {
+                float sample[3];
+                render_pixel(&ray, &objects, light_dir, start_point, sample);
+                for (int k = 0; k < 3; ++k) accum[k] += sample[k];
+            }
             float pixel_color[3];
-            render_pixel(&ray, &objects, light_dir, start_point, pixel_color); //render objects
+            for (int k = 0; k < 3; ++k) pixel_color[k] = accum[k] / SAMPLES;
 
             // RGB printing of the viewport for visualization
             fprintf(fp, "(%f,%f,%f)\t", pixel_color[0], pixel_color[1], pixel_color[2]);
