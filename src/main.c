@@ -11,7 +11,10 @@
 #define SPHERE 0
 #define PLANE 1
 
-#define SAMPLES 64
+#define OPAQUE 0
+#define MIRROR -1
+
+#define SAMPLES 1
 #define MAX_DEPTH 8
 
 // Window dimensions
@@ -23,6 +26,7 @@ struct Object{
     float color[3];
     float emission[3];
     float albedo;
+    float refrac;
     int obj_type;
     int emissive;
 };
@@ -334,14 +338,26 @@ void render_pixel(struct Vector* camera, const struct Objects* objects, float* l
             free(n);
         }
 
-        // Sample from cosine weighted
-        float r1 = (float)rand() / RAND_MAX;
-        float r2 = (float)rand() / RAND_MAX;
-        float* local_dir = cosine_sample_hemisphere(r1, r2);
-        float* global_dir = localToGlobal(local_dir, normal);
+        float* global_dir;
 
-        for (int i = 0; i < 3; ++i)
+        // if it is mirror then we apply the full reflection
+        if(hit_obj->refrac == MIRROR){
+            float local_dir[3] = { -ray.direction[1], ray.direction[0], ray.direction[2] };
+            global_dir = localToGlobal(local_dir, normal);
+        }
+
+        // if it is opaque then we apply the Lambertian
+        if(hit_obj->refrac != MIRROR){
+            // Sample from cosine weighted
+            float r1 = (float)rand() / RAND_MAX;
+            float r2 = (float)rand() / RAND_MAX;
+            float* local_dir = cosine_sample_hemisphere(r1, r2);
+            global_dir = localToGlobal(local_dir, normal);
+            free(local_dir);
+
+            for (int i = 0; i < 3; ++i)
             throughput[i] *= hit_obj->albedo * hit_obj->color[i];
+        }
 
         for(int i = 0; i < 3; ++i){
             ray.direction[i] = global_dir[i];
@@ -350,7 +366,6 @@ void render_pixel(struct Vector* camera, const struct Objects* objects, float* l
 
         start_ray = ray.position;
 
-        free(local_dir);
         free(global_dir);
 
         // Russian roulette after 2 bounce
@@ -399,19 +414,19 @@ int main(void){
 
     // Two spheres resting on the floor
     struct Sphere spheres[] = {
-        { .radius = 0.5f,  .position = {-0.82f, -0.5f,  3.3f}, .object = {.color = {0.3f, 0.4f, 0.80f}, .albedo = 0.7f, .obj_type = SPHERE, .emissive = FALSE} }, // left - blue
-        { .radius = 0.53f, .position = { 0.82f, -0.47f, 3.1f}, .object = {.color = {0.85f, 0.25f, 0.30f}, .albedo = 0.7f, .obj_type = SPHERE, .emissive = FALSE} }, // right - red
-        { .radius = 0.53f, .position = { 0.0f, 1.2f, 3.0f}, .object = {.color = {1.0f, 1.0f, 1.0f}, .albedo = 0.7f, .obj_type = SPHERE, .emission = {8.0f, 8.0f, 8.0f}, .emissive = TRUE} }, // lamp on top
+        { .radius = 0.5f,  .position = {-0.82f, -0.5f,  3.3f}, .object = {.color = {0.3f, 0.4f, 0.80f}, .albedo = 0.7f, .obj_type = SPHERE, .emissive = FALSE, .refrac = 1.5} }, // left - blue
+        { .radius = 0.53f, .position = { 0.82f, -0.47f, 3.1f}, .object = {.color = {0.85f, 0.25f, 0.30f}, .albedo = 0.7f, .obj_type = SPHERE, .emissive = FALSE, .refrac = MIRROR} }, // right - red
+        { .radius = 0.53f, .position = { 0.0f, 1.2f, 3.0f}, .object = {.color = {1.0f, 1.0f, 1.0f}, .albedo = 0.7f, .obj_type = SPHERE, .emission = {12.0f, 12.0f, 12.0f}, .emissive = TRUE, .refrac = OPAQUE} }, // lamp on top
     };
 
     // closed box
     struct Plane planes[] = {
-        { .normal = { 0.0f, 1.0f,  0.0f}, .point = { 0.0f, -1.0f,  0.0f}, .object = {.color = {0.80f, 0.70f, 0.55f}, .albedo = 0.7f, .obj_type = PLANE, .emissive = FALSE} }, // floor
-        { .normal = { 0.0f, 0.0f, -1.0f}, .point = { 0.0f,  0.0f,  4.0f}, .object = {.color = {0.80f, 0.70f, 0.55f}, .albedo = 0.7f, .obj_type = PLANE, .emissive = FALSE} }, // back wall
-        { .normal = { 1.0f, 0.0f,  0.0f}, .point = {-2.0f,  0.0f,  0.0f}, .object = {.color = {0.65f, 0.12f, 0.10f}, .albedo = 0.7f, .obj_type = PLANE, .emissive = FALSE} }, // left wall
-        { .normal = {-1.0f, 0.0f,  0.0f}, .point = { 2.0f,  0.0f,  0.0f}, .object = {.color = {0.15f, 0.15f, 0.60f}, .albedo = 0.7f, .obj_type = PLANE, .emissive = FALSE} }, // right wall
-        { .normal = { 0.0f, 0.0f,  1.0f}, .point = { 0.0f,  0.0f, -4.0f}, .object = {.color = {0.80f, 0.70f, 0.55f}, .albedo = 0.7f, .obj_type = PLANE, .emissive = FALSE} }, // front wall
-        { .normal = { 0.0f, -1.0f, 0.0f}, .point = { 0.0f,  1.0f,  0.0f}, .object = {.color = {0.80f, 0.70f, 0.55f}, .albedo = 0.7f, .obj_type = PLANE, .emissive = FALSE} }, // roof
+        { .normal = { 0.0f, 1.0f,  0.0f}, .point = { 0.0f, -1.0f,  0.0f}, .object = {.color = {0.80f, 0.70f, 0.55f}, .albedo = 0.7f, .obj_type = PLANE, .emissive = FALSE, .refrac = OPAQUE} }, // floor
+        { .normal = { 0.0f, 0.0f, -1.0f}, .point = { 0.0f,  0.0f,  4.0f}, .object = {.color = {0.80f, 0.70f, 0.55f}, .albedo = 0.7f, .obj_type = PLANE, .emissive = FALSE, .refrac = OPAQUE} }, // back wall
+        { .normal = { 1.0f, 0.0f,  0.0f}, .point = {-2.0f,  0.0f,  0.0f}, .object = {.color = {0.65f, 0.12f, 0.10f}, .albedo = 0.7f, .obj_type = PLANE, .emissive = FALSE, .refrac = MIRROR} }, // left wall
+        { .normal = {-1.0f, 0.0f,  0.0f}, .point = { 2.0f,  0.0f,  0.0f}, .object = {.color = {0.15f, 0.15f, 0.60f}, .albedo = 0.7f, .obj_type = PLANE, .emissive = FALSE, .refrac = OPAQUE} }, // right wall
+        { .normal = { 0.0f, 0.0f,  1.0f}, .point = { 0.0f,  0.0f, -4.0f}, .object = {.color = {0.80f, 0.70f, 0.55f}, .albedo = 0.7f, .obj_type = PLANE, .emissive = FALSE, .refrac = OPAQUE} }, // front wall
+        { .normal = { 0.0f, -1.0f, 0.0f}, .point = { 0.0f,  1.0f,  0.0f}, .object = {.color = {0.80f, 0.70f, 0.55f}, .albedo = 0.7f, .obj_type = PLANE, .emissive = FALSE, .refrac = OPAQUE} }, // roof
     };
 
     struct Objects objects;
