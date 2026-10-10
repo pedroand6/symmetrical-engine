@@ -14,10 +14,11 @@
 #define OPAQUE 0
 #define MIRROR -1
 
-#define SAMPLES 1
-#define MAX_DEPTH 8
+#define MAX_DEPTH 24
+#define MAX_RAYS 100
 
 // Window dimensions
+int SAMPLES = 1;
 const int WIDTH = 1280;
 const int HEIGHT = 720;
 const float aspect = (float)WIDTH / (float)HEIGHT;
@@ -56,6 +57,17 @@ struct Objects{
 struct Vector{
     float position[3];
     float direction[3];
+};
+
+struct Ray{
+    struct Vector vector;
+    float throughput[3];
+    int depth;
+};
+
+struct RayStack{
+    struct Ray rays[MAX_RAYS];
+    int count;
 };
 
 float* lambertian(const float* light_dir, const float* normal, const float* sphere_color){
@@ -121,9 +133,9 @@ void intersect_sphere(const struct Sphere* sphere, const struct Vector* ray, flo
     float d_1 = -first_term + sqrt(discriminant);
     float d_2 = -first_term - sqrt(discriminant);
 
-    float d = (d_1 < d_2) ? d_1 : d_2; // Choose the closest intersection point
+    float d = d_2 < 1e-4f ? d_1 : d_2; // Hit point behind the starting point - ray inside sphere / outside
 
-    if(d < 0){
+    if(d < 1e-4f){
         intersection_point[0] = NAN;
         intersection_point[1] = NAN;
         intersection_point[2] = NAN;
@@ -174,13 +186,15 @@ int trace_ray(const struct Objects* objects, int object_type, const struct Vecto
     return 0;
 }
 
-struct Object* render_ray(struct Vector* camera, const struct Objects* objects, float* light_dir, float* start_point, float* ray_color, float* intersection_point){
+struct Object* render_ray(struct Vector* ray_vec, const struct Objects* objects, float* light_dir, float* start_point, float* ray_color, float* intersection_point){
+    /* This trace a ray and calculate its intersections, return the object from the closest hit. */
+
     int object_index = -1;
     struct Object* hit_obj;
 
     float intersection_length = INFINITY;
-    trace_ray(objects, SPHERE, camera, start_point, intersection_point, &intersection_length, &object_index);
-    int hit_plane = trace_ray(objects, PLANE, camera, start_point, intersection_point, &intersection_length, &object_index);
+    trace_ray(objects, SPHERE, ray_vec, start_point, intersection_point, &intersection_length, &object_index);
+    int hit_plane = trace_ray(objects, PLANE, ray_vec, start_point, intersection_point, &intersection_length, &object_index);
     
     if(!isnan(intersection_point[0])){
         // Calculate the normal at the intersection point
@@ -246,7 +260,7 @@ struct Object* render_ray(struct Vector* camera, const struct Objects* objects, 
     } 
     else {
         // if hits nothing, gets a sky gradient
-        float t = fmaxf(camera->direction[1], 0.0f);
+        float t = fmaxf(ray_vec->direction[1], 0.0f);
         float horizon[3] = {0.90f, 0.93f, 0.97f};
         float zenith[3] = {0.40f, 0.60f, 0.90f};
         for(int k = 0; k < 3; ++k){
@@ -298,28 +312,57 @@ float* cosine_sample_hemisphere(float a, float b){
     return vector;
 }
 
-void render_pixel(struct Vector* camera, const struct Objects* objects, float* light_dir, float* start_point, float* pixel_color){
+void get_ray(struct RayStack* ray_stack, struct Ray* ray){
+    if(ray->depth >= MAX_DEPTH || ray_stack->count >= MAX_RAYS) return;
+
+    // Russian roulette after 2 bounce
+    if (ray->depth >= 2) {
+        float prob = fmaxf(ray->throughput[0], fmaxf(ray->throughput[1], ray->throughput[2]));
+        if (prob > 0.95f)
+            prob = 0.95f;
+
+        if ((float)rand() / RAND_MAX > prob)
+            return;
+
+        for (int i = 0; i < 3; ++i) 
+            ray->throughput[i] /= prob; // multiplies the surviving rays so we dont lose energy
+    }
+
+    ray_stack->rays[ray_stack->count++] = *ray;
+}
+
+void render_pixel(struct Vector* camera, const struct Objects* objects, float* light_dir, float* pixel_color){
     /* Render a single pixel by tracing the ray from the camera through the pixel */
 
-    // Ray loop
-    float throughput[3] = { 1.0f, 1.0f, 1.0f };
-    float final_color[3] = {0.0f, 0.0f, 0.0f };
-    struct Vector ray = *camera;
-    float* start_ray = start_point;
+    struct RayStack ray_stack; // Use a ray stack so we can divide the rays, etc
 
-    int depth = 0;
-    while(depth < MAX_DEPTH){
+    // Ray loop
+    struct Ray first_ray = {
+        .throughput = { 1.0f, 1.0f, 1.0f },
+        .vector = *camera,
+        .depth = 0
+    };
+
+    float final_color[3] = { 0.0f, 0.0f, 0.0f };
+    
+    ray_stack.rays[0] = first_ray;
+    ray_stack.count = 1;
+
+    while( ray_stack.count > 0 ){
         // ---------- Get the color for the hit ---------- 
         float intersection_point[3] = {NAN, NAN, NAN};
         float ray_color[3] = {0.0f, 0.0f, 0.0f};
-        struct Object* hit_obj = render_ray(&ray, objects, light_dir, start_ray, ray_color, intersection_point);
-        
-        for (int i = 0; i < 3; ++i){
-            final_color[i] += throughput[i] * ray_color[i];
-        }
 
-        if(!hit_obj || hit_obj->emissive == TRUE){ 
-            break;
+        struct Ray ray = ray_stack.rays[--ray_stack.count];
+
+        struct Object* hit_obj = render_ray(&ray.vector, objects, light_dir, ray.vector.position, ray_color, intersection_point);
+
+        // Hit nothing or emissive object
+        if(!hit_obj || hit_obj->emissive == TRUE){
+            for(int i = 0; i < 3; ++i)
+                final_color[i] += ray.throughput[i] * ray_color[i];
+
+            continue;
         }
 
         // ---------- Get the next ray direction ---------- 
@@ -338,60 +381,150 @@ void render_pixel(struct Vector* camera, const struct Objects* objects, float* l
             free(n);
         }
 
-        float* global_dir;
+        struct Ray next_ray = ray;
+        next_ray.depth = ray.depth + 1;
 
-        // if it is mirror then we apply the full reflection
         if(hit_obj->refrac == MIRROR){
-            float local_dir[3] = { -ray.direction[1], ray.direction[0], ray.direction[2] };
-            global_dir = localToGlobal(local_dir, normal);
-        }
+            // if it is mirror then we apply the full reflection
+            for(int i = 0; i < 3; ++i){
+                next_ray.vector.direction[i] = ray.vector.direction[i] - 2*(vector_dot(ray.vector.direction, normal, 3)) * normal[i];
+                next_ray.vector.position[i] = intersection_point[i] + normal[i] * 1e-3;
+            }
 
-        // if it is opaque then we apply the Lambertian
-        if(hit_obj->refrac != MIRROR){
+            get_ray(&ray_stack, &next_ray);
+        }
+        else if(hit_obj->refrac == OPAQUE){
+            // if it is opaque then we apply the Lambertian
             // Sample from cosine weighted
             float r1 = (float)rand() / RAND_MAX;
             float r2 = (float)rand() / RAND_MAX;
             float* local_dir = cosine_sample_hemisphere(r1, r2);
-            global_dir = localToGlobal(local_dir, normal);
+            float* global_dir = localToGlobal(local_dir, normal);
             free(local_dir);
 
+            for (int i = 0; i < 3; ++i){
+                next_ray.throughput[i] *= hit_obj->albedo * hit_obj->color[i];
+                final_color[i] += ray.throughput[i] * ray_color[i]; // Lambertian
+
+                next_ray.vector.direction[i] = global_dir[i];
+                next_ray.vector.position[i] = intersection_point[i] + normal[i] * 1e-3;
+            }
+
+            get_ray(&ray_stack, &next_ray);
+
+            free(global_dir);
+        }
+        else{
+            // refraction
+            float n1 = 1.0f;
+            float n2 = hit_obj->refrac;
+            float cos_i = -vector_dot(ray.vector.direction, normal, 3);
+
+            if(cos_i < 0.0f){ // Leaving object
+                n2 = 1.0f;
+                n1 = hit_obj->refrac;
+                cos_i = -cos_i;
+                
+                for(int i = 0; i < 3; ++i)
+                    normal[i] = -normal[i];
+            }
+
+            float eta = n1 / n2;
+
+            float theta_i = acosf(cos_i); // angle between ray and normal
+            float r_0 = pow((n1 - n2) / (n1 + n2), 2);
+            float r = r_0 + (1 - r_0) * pow((1 - cosf(theta_i)), 5); // schlick approximation for reflection contribution
+
+            float k = 1.0f - eta * eta * (1.0f - cos_i * cos_i);
+
+            if(k < 0.0f)
+                r = 1.0f; // total internal reflection
+
+            // ---- create reflected ray ----
+            float mirror_dir[3];
+            for(int i = 0; i < 3; ++i){
+                mirror_dir[i] = ray.vector.direction[i] + 2.0f*cos_i * normal[i];
+            }
+
+            float new_throughput[3];
             for (int i = 0; i < 3; ++i)
-            throughput[i] *= hit_obj->albedo * hit_obj->color[i];
+                new_throughput[i] = ray.throughput[i] * r;
+
+            struct Ray reflected_ray = {
+                .throughput = {
+                    new_throughput[0],
+                    new_throughput[1],
+                    new_throughput[2]
+                },
+                .depth = next_ray.depth,
+            };
+
+            for(int i = 0; i < 3; ++i){
+                reflected_ray.vector.direction[i] = mirror_dir[i];
+                reflected_ray.vector.position[i] = intersection_point[i] + normal[i] * 1e-3;
+            }
+
+            get_ray(&ray_stack, &reflected_ray);
+
+            // ---- redirect this as refracted ray ----
+            // rotate the vector
+            if(k >= 0){ // entering object
+                float cos_t = sqrtf(k);
+                for (int i = 0; i < 3; ++i){
+                    next_ray.vector.direction[i] = eta * ray.vector.direction[i] + (eta * cos_i - cos_t) * normal[i];
+                    next_ray.vector.position[i] = intersection_point[i] - normal[i] * 1e-3;
+                }
+
+                for (int i = 0; i < 3; ++i)
+                    next_ray.throughput[i] *= (1 - r) * hit_obj->color[i];
+
+                get_ray(&ray_stack, &next_ray);
+            }
         }
-
-        for(int i = 0; i < 3; ++i){
-            ray.direction[i] = global_dir[i];
-            ray.position[i] = intersection_point[i] + normal[i] * 1e-3;
-        }
-
-        start_ray = ray.position;
-
-        free(global_dir);
-
-        // Russian roulette after 2 bounce
-        if (depth >= 2) {
-            float prob = fmaxf(throughput[0], fmaxf(throughput[1], throughput[2]));
-            if (prob > 0.95f)
-                prob = 0.95f;
-
-            if ((float)rand() / RAND_MAX > prob) 
-                break;
-
-            // Rays that survived become weaker
-            for (int i = 0; i < 3; ++i) 
-                throughput[i] /= prob;
-        }
-
-        depth++;
     }
 
     for(int k = 0; k < 3; ++k){
         pixel_color[k] = final_color[k];
-        if(pixel_color[k] > 1.0f){ pixel_color[k] = 1.0f; }
     }
 }
 
+static int compare_floats(const void* a, const void* b){
+    /* Compare the value of two floats and returns
+        1 if a is bigger than b or 0 if the opposite */
+
+    float fa = *(const float*)a;
+    float fb = *(const float*)b;
+    return (fa > fb) - (fa < fb);
+}
+
+void write_image(const char* path, float* image){
+    /* Writes the image from the rgb array to a .csv file */
+
+    FILE *fp = fopen(path, "w");
+
+    for(int j = 0; j < HEIGHT; ++j){
+        for(int i = 0; i < WIDTH; ++i){
+            // RGB printing of the viewport for visualization
+            int n = (j * WIDTH + i) * 3;
+            fprintf(fp, "(%f,%f,%f)\t", image[n], image[n+1], image[n+2]);
+        }
+        fprintf(fp, "\n");
+    }
+
+    fclose(fp);
+}
+
 int main(void){
+    // Read user inputs
+    printf("Insira a quantidade de Samples por pixel: ");
+    fflush(stdout);
+    scanf(" %d", &SAMPLES);
+
+    printf("Insira o caminho de saída da imagem: ");
+    fflush(stdout);
+    char output_path[256];
+    scanf(" %255s", &output_path);
+
     // Initialize camera at a height of 1.5 above the floor, looking straight ahead so the horizon splits the image
     struct Vector camera = {
         .position = {0.0f, 0.3f, 0.0f},
@@ -414,8 +547,10 @@ int main(void){
 
     // Two spheres resting on the floor
     struct Sphere spheres[] = {
-        { .radius = 0.5f,  .position = {-0.82f, -0.5f,  3.3f}, .object = {.color = {0.3f, 0.4f, 0.80f}, .albedo = 0.7f, .obj_type = SPHERE, .emissive = FALSE, .refrac = 1.5} }, // left - blue
-        { .radius = 0.53f, .position = { 0.82f, -0.47f, 3.1f}, .object = {.color = {0.85f, 0.25f, 0.30f}, .albedo = 0.7f, .obj_type = SPHERE, .emissive = FALSE, .refrac = MIRROR} }, // right - red
+        { .radius = 0.5f,  .position = {-0.82f, -0.5f,  3.3f}, .object = {.color = {0.3f, 0.4f, 0.80f}, .albedo = 0.7f, .obj_type = SPHERE, .emissive = FALSE, .refrac = OPAQUE} }, // left - blue
+        { .radius = 0.53f, .position = { 0.82f, -0.47f, 3.1f}, .object = {.color = {0.85f, 0.25f, 0.30f}, .albedo = 0.7f, .obj_type = SPHERE, .emissive = FALSE, .refrac = OPAQUE} }, // right - red
+        { .radius = 0.5f,  .position = {-1.0f, -0.5f,  2.5f}, .object = {.color = {1.0f, 1.0f, 1.0f}, .albedo = 0.7f, .obj_type = SPHERE, .emissive = FALSE, .refrac = 1.5} }, // left - blue
+        { .radius = 0.53f, .position = { 1.0f, -0.47f, 2.5f}, .object = {.color = {0.0f, 0.0f, 0.0f}, .albedo = 0.7f, .obj_type = SPHERE, .emissive = FALSE, .refrac = MIRROR} }, // right - red
         { .radius = 0.53f, .position = { 0.0f, 1.2f, 3.0f}, .object = {.color = {1.0f, 1.0f, 1.0f}, .albedo = 0.7f, .obj_type = SPHERE, .emission = {12.0f, 12.0f, 12.0f}, .emissive = TRUE, .refrac = OPAQUE} }, // lamp on top
     };
 
@@ -423,7 +558,7 @@ int main(void){
     struct Plane planes[] = {
         { .normal = { 0.0f, 1.0f,  0.0f}, .point = { 0.0f, -1.0f,  0.0f}, .object = {.color = {0.80f, 0.70f, 0.55f}, .albedo = 0.7f, .obj_type = PLANE, .emissive = FALSE, .refrac = OPAQUE} }, // floor
         { .normal = { 0.0f, 0.0f, -1.0f}, .point = { 0.0f,  0.0f,  4.0f}, .object = {.color = {0.80f, 0.70f, 0.55f}, .albedo = 0.7f, .obj_type = PLANE, .emissive = FALSE, .refrac = OPAQUE} }, // back wall
-        { .normal = { 1.0f, 0.0f,  0.0f}, .point = {-2.0f,  0.0f,  0.0f}, .object = {.color = {0.65f, 0.12f, 0.10f}, .albedo = 0.7f, .obj_type = PLANE, .emissive = FALSE, .refrac = MIRROR} }, // left wall
+        { .normal = { 1.0f, 0.0f,  0.0f}, .point = {-2.0f,  0.0f,  0.0f}, .object = {.color = {0.4f, 0.0f, 0.0f}, .albedo = 0.7f, .obj_type = PLANE, .emissive = FALSE, .refrac = OPAQUE} }, // left wall
         { .normal = {-1.0f, 0.0f,  0.0f}, .point = { 2.0f,  0.0f,  0.0f}, .object = {.color = {0.15f, 0.15f, 0.60f}, .albedo = 0.7f, .obj_type = PLANE, .emissive = FALSE, .refrac = OPAQUE} }, // right wall
         { .normal = { 0.0f, 0.0f,  1.0f}, .point = { 0.0f,  0.0f, -4.0f}, .object = {.color = {0.80f, 0.70f, 0.55f}, .albedo = 0.7f, .obj_type = PLANE, .emissive = FALSE, .refrac = OPAQUE} }, // front wall
         { .normal = { 0.0f, -1.0f, 0.0f}, .point = { 0.0f,  1.0f,  0.0f}, .object = {.color = {0.80f, 0.70f, 0.55f}, .albedo = 0.7f, .obj_type = PLANE, .emissive = FALSE, .refrac = OPAQUE} }, // roof
@@ -435,7 +570,8 @@ int main(void){
     objects.sphere_count = sizeof(spheres) / sizeof(spheres[0]);
     objects.plane_count = sizeof(planes) / sizeof(planes[0]);
 
-    FILE *fp = fopen("../analysis/output.csv", "w");
+    float N = HEIGHT * WIDTH;
+    float* image = malloc((size_t)N * 3 * sizeof(float));
 
     float light[3] = {0.0f, 1.0f, -0.5f};
     float* light_dir = vector_normalize(light, 3);
@@ -466,23 +602,44 @@ int main(void){
 
             float start_point[3];
             memcpy(start_point, camera.position, 3 * sizeof(float));
+            
+            // accumulate and get the mean of the rays for each pixel
+            float samples[SAMPLES][3];
+            float lum[SAMPLES]; // brightness of each sample
+
+            for (int s = 0; s < SAMPLES; ++s) {
+                render_pixel(&ray, &objects, light_dir, samples[s]);
+                lum[s] = 0.2126f * samples[s][0] + 0.7152f * samples[s][1] + 0.0722f * samples[s][2];
+            }
+
+            // median brightness of this pixels samples
+            float sorted[SAMPLES];
+            memcpy(sorted, lum, sizeof(sorted));
+            qsort(sorted, SAMPLES, sizeof(float), compare_floats);
+            float median = sorted[SAMPLES / 2];
+
+            // a sample is an outlier if its much brighter than the median
+            const float OUTLIER_FACTOR = 4.0f;
+            const float MIN_THRESHOLD = 1.0f;
+            float threshold = fmaxf(OUTLIER_FACTOR * median, MIN_THRESHOLD);
 
             float accum[3] = {0.0f, 0.0f, 0.0f};
             for (int s = 0; s < SAMPLES; ++s) {
-                float sample[3];
-                render_pixel(&ray, &objects, light_dir, start_point, sample);
-                for (int k = 0; k < 3; ++k) accum[k] += sample[k];
+                // scale outliers down to the threshold, keeping their color
+                float scale = (lum[s] > threshold) ? threshold / lum[s] : 1.0f;
+                for (int k = 0; k < 3; ++k)
+                    accum[k] += samples[s][k] * scale;
             }
-            float pixel_color[3];
-            for (int k = 0; k < 3; ++k) pixel_color[k] = accum[k] / SAMPLES;
-
-            // RGB printing of the viewport for visualization
-            fprintf(fp, "(%f,%f,%f)\t", pixel_color[0], pixel_color[1], pixel_color[2]);
+            
+            int n = (j * WIDTH + i) * 3;
+            for (int k = 0; k < 3; ++k) {
+                image[n + k] = fminf(accum[k] / SAMPLES, 1.0f);
+            }
         }
-        fprintf(fp, "\n");
     }
 
-    fclose(fp);
+    write_image(output_path, image);
+
     free(light_dir);
     free(right_one);
     free(up);
