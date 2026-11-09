@@ -1,7 +1,11 @@
+// OpenMP header
+#include <omp.h>
+
 #include <stdio.h>
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <ctype.h>
 #include "vector/vector.h"
 
@@ -312,7 +316,7 @@ float* cosine_sample_hemisphere(float a, float b){
     return vector;
 }
 
-void get_ray(struct RayStack* ray_stack, struct Ray* ray){
+void get_ray(struct RayStack* ray_stack, struct Ray* ray, unsigned int* seed){
     if(ray->depth >= MAX_DEPTH || ray_stack->count >= MAX_RAYS) return;
 
     // Russian roulette after 2 bounce
@@ -321,7 +325,7 @@ void get_ray(struct RayStack* ray_stack, struct Ray* ray){
         if (prob > 0.95f)
             prob = 0.95f;
 
-        if ((float)rand() / RAND_MAX > prob)
+        if ((float)rand_r(seed) / RAND_MAX > prob)
             return;
 
         for (int i = 0; i < 3; ++i) 
@@ -331,7 +335,7 @@ void get_ray(struct RayStack* ray_stack, struct Ray* ray){
     ray_stack->rays[ray_stack->count++] = *ray;
 }
 
-void render_pixel(struct Vector* camera, const struct Objects* objects, float* light_dir, float* pixel_color){
+void render_pixel(struct Vector* camera, const struct Objects* objects, float* light_dir, float* pixel_color, unsigned int* seed){
     /* Render a single pixel by tracing the ray from the camera through the pixel */
 
     struct RayStack ray_stack; // Use a ray stack so we can divide the rays, etc
@@ -391,13 +395,13 @@ void render_pixel(struct Vector* camera, const struct Objects* objects, float* l
                 next_ray.vector.position[i] = intersection_point[i] + normal[i] * 1e-3;
             }
 
-            get_ray(&ray_stack, &next_ray);
+            get_ray(&ray_stack, &next_ray, seed);
         }
         else if(hit_obj->refrac == OPAQUE){
             // if it is opaque then we apply the Lambertian
             // Sample from cosine weighted
-            float r1 = (float)rand() / RAND_MAX;
-            float r2 = (float)rand() / RAND_MAX;
+            float r1 = (float)rand_r(seed) / RAND_MAX;
+            float r2 = (float)rand_r(seed) / RAND_MAX;
             float* local_dir = cosine_sample_hemisphere(r1, r2);
             float* global_dir = localToGlobal(local_dir, normal);
             free(local_dir);
@@ -410,7 +414,7 @@ void render_pixel(struct Vector* camera, const struct Objects* objects, float* l
                 next_ray.vector.position[i] = intersection_point[i] + normal[i] * 1e-3;
             }
 
-            get_ray(&ray_stack, &next_ray);
+            get_ray(&ray_stack, &next_ray, seed);
 
             free(global_dir);
         }
@@ -464,7 +468,7 @@ void render_pixel(struct Vector* camera, const struct Objects* objects, float* l
                 reflected_ray.vector.position[i] = intersection_point[i] + normal[i] * 1e-3;
             }
 
-            get_ray(&ray_stack, &reflected_ray);
+            get_ray(&ray_stack, &reflected_ray, seed);
 
             // ---- redirect this as refracted ray ----
             // rotate the vector
@@ -478,7 +482,7 @@ void render_pixel(struct Vector* camera, const struct Objects* objects, float* l
                 for (int i = 0; i < 3; ++i)
                     next_ray.throughput[i] *= (1 - r) * hit_obj->color[i];
 
-                get_ray(&ray_stack, &next_ray);
+                get_ray(&ray_stack, &next_ray, seed);
             }
         }
     }
@@ -576,39 +580,46 @@ int main(void){
     float light[3] = {0.0f, 1.0f, -0.5f};
     float* light_dir = vector_normalize(light, 3);
 
-    // Render the scene
+    uint base_seed = (unsigned int)time(NULL) ^ 19937;
+
+    // Render the scene in parallel using OpenMP
+    #pragma omp parallel for collapse(2) schedule(dynamic, 64)
     for(int j = 0; j < HEIGHT; ++j){
         for(int i = 0; i < WIDTH; ++i){
-            // the ray starts at the camera and points through its pixel on the viewport - perspective projection
-            float u = ((i + (float)rand()/RAND_MAX) / WIDTH - 0.5f) * 2.0f * viewport_half * aspect;
-            float v = ((j + (float)rand()/RAND_MAX) / HEIGHT - 0.5f) * 2.0f * viewport_half;
-
-            float pixel_dir[3];
-            float* u_right = vector_scale(right_one, u, 3);
-            float* v_up = vector_scale(up, v, 3);
-            float* temp = vector_add(camera.direction, u_right, 3);
-            float* pixel_dir_temp = vector_add(temp, v_up, 3);
-            memcpy(pixel_dir, pixel_dir_temp, 3 * sizeof(float));
-            
-            free(u_right);
-            free(v_up);
-            free(temp);
-            free(pixel_dir_temp);
-
-            struct Vector ray = camera;
-            float* ray_dir = vector_normalize(pixel_dir, 3);
-            memcpy(ray.direction, ray_dir, 3 * sizeof(float));
-            free(ray_dir);
-
-            float start_point[3];
-            memcpy(start_point, camera.position, 3 * sizeof(float));
+            uint seed = (j * WIDTH + i) ^ base_seed;
             
             // accumulate and get the mean of the rays for each pixel
             float samples[SAMPLES][3];
             float lum[SAMPLES]; // brightness of each sample
 
             for (int s = 0; s < SAMPLES; ++s) {
-                render_pixel(&ray, &objects, light_dir, samples[s]);
+                // the ray starts at the camera and points through its pixel on the viewport - perspective projection
+                // jitter a little the direction for each sample so we can get a anti-aliasing effect
+                float u = ((i + (float)rand_r(&seed)/RAND_MAX) / WIDTH - 0.5f) * 2.0f * viewport_half * aspect;
+                float v = ((j + (float)rand_r(&seed)/RAND_MAX) / HEIGHT - 0.5f) * 2.0f * viewport_half;
+
+                float pixel_dir[3];
+                float* u_right = vector_scale(right_one, u, 3);
+                float* v_up = vector_scale(up, v, 3);
+                float* temp = vector_add(camera.direction, u_right, 3);
+                float* pixel_dir_temp = vector_add(temp, v_up, 3);
+                memcpy(pixel_dir, pixel_dir_temp, 3 * sizeof(float));
+                
+                free(u_right);
+                free(v_up);
+                free(temp);
+                free(pixel_dir_temp);
+
+                struct Vector ray = camera;
+                float* ray_dir = vector_normalize(pixel_dir, 3);
+                memcpy(ray.direction, ray_dir, 3 * sizeof(float));
+                free(ray_dir);
+
+                float start_point[3];
+                memcpy(start_point, camera.position, 3 * sizeof(float));
+
+                // Render the sample
+                render_pixel(&ray, &objects, light_dir, samples[s], &seed);
                 lum[s] = 0.2126f * samples[s][0] + 0.7152f * samples[s][1] + 0.0722f * samples[s][2];
             }
 
