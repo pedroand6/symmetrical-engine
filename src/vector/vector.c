@@ -2,28 +2,22 @@
 #include <math.h>
 #include <stdlib.h>
 
-float* vector_add(const float* a, const float* b, size_t size) {
-    float* result = malloc(size * sizeof(float));
+void vector_add(const float* a, const float* b, size_t size, float* result) {
     for (size_t i = 0; i < size; ++i) {
         result[i] = a[i] + b[i];
     }
-    return result;
 }
 
-float* vector_subtract(const float* a, const float* b, size_t size) {
-    float* result = malloc(size * sizeof(float));
+void vector_subtract(const float* a, const float* b, size_t size, float* result) {
     for (size_t i = 0; i < size; ++i) {
         result[i] = a[i] - b[i];
     }
-    return result;
 }
 
-float* vector_scale(const float* a, float scalar, size_t size) {
-    float* result = malloc(size * sizeof(float));
+void vector_scale(const float* a, float scalar, size_t size, float* result) {
     for (size_t i = 0; i < size; ++i) {
         result[i] = a[i] * scalar;
     }
-    return result;
 }
 
 float vector_dot(const float* a, const float* b, size_t size) {
@@ -50,13 +44,10 @@ float vector_length(const float* a, size_t size) {
     return sqrt(length);
 }
 
-float* vector_normalize(const float* a, size_t size) {
+void vector_normalize(const float* a, size_t size, float* result) {
     float length = vector_length(a, size);
 
-    float* result = malloc(size * sizeof(float));
     for (size_t i = 0; i < size; ++i) {
         result[i] = a[i] / length;
     }
-
-    return result;
 }

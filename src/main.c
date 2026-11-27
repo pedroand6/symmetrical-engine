@@ -21,6 +21,8 @@
 #define MAX_DEPTH 24
 #define MAX_RAYS 100
 
+#define TILE 8
+
 // Window dimensions
 int SAMPLES = 1;
 const int WIDTH = 1280;
@@ -74,22 +76,23 @@ struct RayStack{
     int count;
 };
 
-float* lambertian(const float* light_dir, const float* normal, const float* sphere_color){
+void lambertian(const float* light_dir, const float* normal, const float* sphere_color, float* result){
     /* Calculate the Lambertian reflectance for a given light direction and surface normal */
 
     float dot_product = vector_dot(light_dir, normal, 3);
     float intensity = fmaxf(dot_product, 0.0f);
 
-    return vector_scale(sphere_color, intensity, 3);
+    vector_scale(sphere_color, intensity, 3, result);
 }
 
 void intersect_plane(const struct Plane* plane, const struct Vector* ray, float* start_point, float* intersection_point){
     /* Calculate the intersection point between the ray and the plane if there is one */
 
-    float* pl = vector_subtract(plane->point, start_point, 3);
+    float pl[3];
+    vector_subtract(plane->point, start_point, 3, pl);
+    
     float first_term = vector_dot(pl, plane->normal, 3);
     float second_term = vector_dot(ray->direction, plane->normal, 3);
-    free(pl);
 
     // If the second term is zero, there is no intersection
     if(fabs(second_term) < 1e-6){
@@ -108,21 +111,18 @@ void intersect_plane(const struct Plane* plane, const struct Vector* ray, float*
         return;
     }
 
-    float* scaled_dir = vector_scale(ray->direction, d, 3);
-    float* temp = vector_add(start_point, scaled_dir, 3);
-    memcpy(intersection_point, temp, 3 * sizeof(float));
-
-    free(temp);
-    free(scaled_dir);
+    float scaled_dir[3];
+    vector_scale(ray->direction, d, 3, scaled_dir);
+    vector_add(start_point, scaled_dir, 3, intersection_point);
 }
 
 void intersect_sphere(const struct Sphere* sphere, const struct Vector* ray, float* start_point, float* intersection_point){
     /* Calculate the intersection point between the camera ray and the sphere if there is one */
 
-    float* oc = vector_subtract(start_point, sphere->position, 3);
+    float oc[3];
+    vector_subtract(start_point, sphere->position, 3, oc);
     float first_term = vector_dot(ray->direction, oc, 3);
     float second_term = vector_length(oc, 3);
-    free(oc);
 
     float discriminant = first_term * first_term - second_term * second_term + sphere->radius * sphere->radius;
 
@@ -146,12 +146,9 @@ void intersect_sphere(const struct Sphere* sphere, const struct Vector* ray, flo
         return;
     }
 
-    float* scaled_dir = vector_scale(ray->direction, d, 3);
-    float* temp = vector_add(start_point, scaled_dir, 3);
-    memcpy(intersection_point, temp, 3 * sizeof(float));
-
-    free(temp);
-    free(scaled_dir);
+    float scaled_dir[3];
+    vector_scale(ray->direction, d, 3, scaled_dir);
+    vector_add(start_point, scaled_dir, 3, intersection_point);
 }
 
 int trace_ray(const struct Objects* objects, int object_type, const struct Vector* ray, float* start_point, float* intersection_point, float* intersection_length, int* object_index){
@@ -170,9 +167,10 @@ int trace_ray(const struct Objects* objects, int object_type, const struct Vecto
         }
 
         if(!isnan(new_intersection_point[0])){ // Got the object
-            float* to_hit = vector_subtract(new_intersection_point, start_point, 3);
+            float to_hit[3];
+            vector_subtract(new_intersection_point, start_point, 3, to_hit);
             float new_intersection_length = vector_length(to_hit, 3);
-            free(to_hit);
+            
             if(*intersection_length > new_intersection_length){
                 // Update the intersection point and length if this sphere is closer than the previous one
                 memcpy(intersection_point, new_intersection_point, 3 * sizeof(float));
@@ -202,20 +200,20 @@ struct Object* render_ray(struct Vector* ray_vec, const struct Objects* objects,
     
     if(!isnan(intersection_point[0])){
         // Calculate the normal at the intersection point
-        float* normal;
+        float normal[3];
         const float* color;
 
         // Get object normal vector and color
         if(hit_plane == FALSE){
-            float* to_surface = vector_subtract(intersection_point, objects->sphere[object_index].position, 3);
-            normal = vector_normalize(to_surface, 3);
-            free(to_surface);
+            float to_surface[3];
+            vector_subtract(intersection_point, objects->sphere[object_index].position, 3, to_surface);
+            vector_normalize(to_surface, 3, normal);
             
             hit_obj = &objects->sphere[object_index].object;
             color = hit_obj->color;
         }
         else{
-            normal = vector_normalize(objects->plane[object_index].normal, 3);
+            vector_normalize(objects->plane[object_index].normal, 3, normal);
 
             hit_obj = &objects->plane[object_index].object;
             color = hit_obj->color;
@@ -223,7 +221,6 @@ struct Object* render_ray(struct Vector* ray_vec, const struct Objects* objects,
 
         if(hit_obj->emissive == TRUE){
             memcpy(ray_color, hit_obj->emission, 3 * sizeof(float));
-            free(normal);
             return hit_obj;
         }
 
@@ -251,14 +248,12 @@ struct Object* render_ray(struct Vector* ray_vec, const struct Objects* objects,
         }
 
         if(in_shadow == FALSE){
-            float* lambert_color = lambertian(light_dir, normal, color);
+            float lambert_color[3];
+            lambertian(light_dir, normal, color, lambert_color);
             for(int k = 0; k < 3; ++k){
                 ray_color[k] += lambert_color[k] * (1.0f - ambient);
             }
-            free(lambert_color);
         }
-
-        free(normal);
 
         return hit_obj;
     } 
@@ -276,7 +271,7 @@ struct Object* render_ray(struct Vector* ray_vec, const struct Objects* objects,
 
 }
 
-float* localToGlobal(float* localV, float* normal) {
+void localToGlobal(float* localV, float* normal, float* result){
     /* Transforms the local vector to match a normal vector in global space */
     float tangent[3], bitangent[3];
 
@@ -296,24 +291,19 @@ float* localToGlobal(float* localV, float* normal) {
     vector_cross(normal, tangent, bitangent);
 
     // global = x * tangent + y * bitangent + z * normal
-    float* globalV = malloc(sizeof(float) * 3);
     for (int k = 0; k < 3; ++k)
-        globalV[k] = localV[0] * tangent[k] + localV[1] * bitangent[k] + localV[2] * normal[k];
-    return globalV;
+        result[k] = localV[0] * tangent[k] + localV[1] * bitangent[k] + localV[2] * normal[k];
 }
 
-float* cosine_sample_hemisphere(float a, float b){
+void cosine_sample_hemisphere(float a, float b, float* result){
     /* Calculate the cosine sample hemisphere direction */
 
     float theta = acos(sqrt(a));
     float phi = 2.0 * M_PI * b;
 
-    float* vector = malloc(3 * sizeof(float));
-    vector[0] = sinf(theta) * cosf(phi);
-    vector[1] = sinf(theta) * sinf(phi);
-    vector[2] = cosf(theta);
-
-    return vector;
+    result[0] = sinf(theta) * cosf(phi);
+    result[1] = sinf(theta) * sinf(phi);
+    result[2] = cosf(theta);
 }
 
 void get_ray(struct RayStack* ray_stack, struct Ray* ray, unsigned int* seed){
@@ -378,11 +368,9 @@ void render_pixel(struct Vector* camera, const struct Objects* objects, float* l
         }
         else {
             struct Sphere obj = *(struct Sphere*) hit_obj;
-            float* to_surface = vector_subtract(intersection_point, obj.position, 3);
-            float* n = vector_normalize(to_surface, 3);
-            memcpy(normal, n, sizeof(normal));
-            free(to_surface);
-            free(n);
+            float to_surface[3];
+            vector_subtract(intersection_point, obj.position, 3, to_surface);
+            vector_normalize(to_surface, 3, normal);
         }
 
         struct Ray next_ray = ray;
@@ -402,9 +390,11 @@ void render_pixel(struct Vector* camera, const struct Objects* objects, float* l
             // Sample from cosine weighted
             float r1 = (float)rand_r(seed) / RAND_MAX;
             float r2 = (float)rand_r(seed) / RAND_MAX;
-            float* local_dir = cosine_sample_hemisphere(r1, r2);
-            float* global_dir = localToGlobal(local_dir, normal);
-            free(local_dir);
+
+            float local_dir[3];
+            cosine_sample_hemisphere(r1, r2, local_dir);
+            float global_dir[3];
+            localToGlobal(local_dir, normal, global_dir);
 
             for (int i = 0; i < 3; ++i){
                 next_ray.throughput[i] *= hit_obj->albedo * hit_obj->color[i];
@@ -415,8 +405,6 @@ void render_pixel(struct Vector* camera, const struct Objects* objects, float* l
             }
 
             get_ray(&ray_stack, &next_ray, seed);
-
-            free(global_dir);
         }
         else{
             // refraction
@@ -435,9 +423,8 @@ void render_pixel(struct Vector* camera, const struct Objects* objects, float* l
 
             float eta = n1 / n2;
 
-            float theta_i = acosf(cos_i); // angle between ray and normal
             float r_0 = pow((n1 - n2) / (n1 + n2), 2);
-            float r = r_0 + (1 - r_0) * pow((1 - cosf(theta_i)), 5); // schlick approximation for reflection contribution
+            float r = r_0 + (1 - r_0) * pow((1 - cos_i), 5); // schlick approximation for reflection contribution
 
             float k = 1.0f - eta * eta * (1.0f - cos_i * cos_i);
 
@@ -527,7 +514,12 @@ int main(void){
     printf("Insira o caminho de saída da imagem: ");
     fflush(stdout);
     char output_path[256];
-    scanf(" %255s", &output_path);
+    scanf(" %255s", output_path);
+
+    printf("Insira o número de threads: ");
+    fflush(stdout);
+    int nthreads;
+    scanf(" %d", &nthreads);
 
     // Initialize camera at a height of 1.5 above the floor, looking straight ahead so the horizon splits the image
     struct Vector camera = {
@@ -537,14 +529,15 @@ int main(void){
 
     // Camera vectors orientation
     float world_up[3] = {0.0f, 1.0f, 0.0f};
-    float* right = malloc(sizeof(float) * 3);
+
+    float right[3];
     vector_cross(world_up, camera.direction, right);
 
-    float* right_one = vector_normalize(right, 3);
-    float* up = malloc(sizeof(float) * 3);
-    vector_cross(camera.direction, right_one, up);
+    float right_one[3];
+    vector_normalize(right, 3, right_one);
 
-    free(right);
+    float up[3];
+    vector_cross(camera.direction, right_one, up);
 
     // camera FOV
     const float viewport_half = 0.5f;
@@ -574,85 +567,99 @@ int main(void){
     objects.sphere_count = sizeof(spheres) / sizeof(spheres[0]);
     objects.plane_count = sizeof(planes) / sizeof(planes[0]);
 
-    float N = HEIGHT * WIDTH;
+    size_t N = HEIGHT * WIDTH;
     float* image = malloc((size_t)N * 3 * sizeof(float));
 
     float light[3] = {0.0f, 1.0f, -0.5f};
-    float* light_dir = vector_normalize(light, 3);
+    float light_dir[3];
+    vector_normalize(light, 3, light_dir);
 
     uint base_seed = (unsigned int)time(NULL) ^ 19937;
 
+    const int tiles_x = (WIDTH  + TILE - 1) / TILE;
+    const int tiles_y = (HEIGHT + TILE - 1) / TILE;
+    const int total_tiles = tiles_x * tiles_y;
+
     // Render the scene in parallel using OpenMP
-    #pragma omp parallel for collapse(2) schedule(dynamic, 64)
-    for(int j = 0; j < HEIGHT; ++j){
-        for(int i = 0; i < WIDTH; ++i){
-            uint seed = (j * WIDTH + i) ^ base_seed;
-            
-            // accumulate and get the mean of the rays for each pixel
-            float samples[SAMPLES][3];
-            float lum[SAMPLES]; // brightness of each sample
+    #pragma omp parallel num_threads(nthreads)
+    {
+        // variables for each thread
+        float (*samples)[3] = malloc((size_t)SAMPLES * sizeof(*samples)); // accumulate and get the mean of the rays for each pixel
+        float *lum = malloc((size_t)SAMPLES * sizeof(float)); // brightness of each sample
+        float *sorted = malloc((size_t)SAMPLES * sizeof(float)); // median brightness of this pixels samples
 
-            for (int s = 0; s < SAMPLES; ++s) {
-                // the ray starts at the camera and points through its pixel on the viewport - perspective projection
-                // jitter a little the direction for each sample so we can get a anti-aliasing effect
-                float u = ((i + (float)rand_r(&seed)/RAND_MAX) / WIDTH - 0.5f) * 2.0f * viewport_half * aspect;
-                float v = ((j + (float)rand_r(&seed)/RAND_MAX) / HEIGHT - 0.5f) * 2.0f * viewport_half;
+        // Paralellize in "tiles" of 8x8 pixels
+        #pragma omp for schedule(dynamic, 1)
+        for (int tile = 0; tile < total_tiles; ++tile) {
+            int ty = (tile / tiles_x) * TILE;
+            int tx = (tile % tiles_x) * TILE;
+            int j_end = (ty + TILE < HEIGHT) ? ty + TILE : HEIGHT;
+            int i_end = (tx + TILE < WIDTH) ? tx + TILE : WIDTH;
 
-                float pixel_dir[3];
-                float* u_right = vector_scale(right_one, u, 3);
-                float* v_up = vector_scale(up, v, 3);
-                float* temp = vector_add(camera.direction, u_right, 3);
-                float* pixel_dir_temp = vector_add(temp, v_up, 3);
-                memcpy(pixel_dir, pixel_dir_temp, 3 * sizeof(float));
-                
-                free(u_right);
-                free(v_up);
-                free(temp);
-                free(pixel_dir_temp);
+            for (int j = ty; j < j_end; ++j) {
+                for (int i = tx; i < i_end; ++i) {
+                    uint seed = (j * WIDTH + i) ^ base_seed;
+                    
+                    for (int s = 0; s < SAMPLES; ++s) {
+                        // the ray starts at the camera and points through its pixel on the viewport - perspective projection
+                        // jitter a little the direction for each sample so we can get a anti-aliasing effect
+                        float u = ((i + (float)rand_r(&seed)/RAND_MAX) / WIDTH - 0.5f) * 2.0f * viewport_half * aspect;
+                        float v = ((j + (float)rand_r(&seed)/RAND_MAX) / HEIGHT - 0.5f) * 2.0f * viewport_half;
 
-                struct Vector ray = camera;
-                float* ray_dir = vector_normalize(pixel_dir, 3);
-                memcpy(ray.direction, ray_dir, 3 * sizeof(float));
-                free(ray_dir);
+                        float pixel_dir[3];
+                        float u_right[3];
+                        float v_up[3];
+                        float temp[3];
 
-                float start_point[3];
-                memcpy(start_point, camera.position, 3 * sizeof(float));
+                        vector_scale(right_one, u, 3, u_right);
+                        vector_scale(up, v, 3, v_up);
+                        vector_add(camera.direction, u_right, 3, temp);
+                        vector_add(temp, v_up, 3, pixel_dir);
 
-                // Render the sample
-                render_pixel(&ray, &objects, light_dir, samples[s], &seed);
-                lum[s] = 0.2126f * samples[s][0] + 0.7152f * samples[s][1] + 0.0722f * samples[s][2];
-            }
+                        struct Vector ray = camera;
 
-            // median brightness of this pixels samples
-            float sorted[SAMPLES];
-            memcpy(sorted, lum, sizeof(sorted));
-            qsort(sorted, SAMPLES, sizeof(float), compare_floats);
-            float median = sorted[SAMPLES / 2];
+                        vector_normalize(pixel_dir, 3, ray.direction);
 
-            // a sample is an outlier if its much brighter than the median
-            const float OUTLIER_FACTOR = 4.0f;
-            const float MIN_THRESHOLD = 1.0f;
-            float threshold = fmaxf(OUTLIER_FACTOR * median, MIN_THRESHOLD);
+                        float start_point[3];
+                        memcpy(start_point, camera.position, 3 * sizeof(float));
 
-            float accum[3] = {0.0f, 0.0f, 0.0f};
-            for (int s = 0; s < SAMPLES; ++s) {
-                // scale outliers down to the threshold, keeping their color
-                float scale = (lum[s] > threshold) ? threshold / lum[s] : 1.0f;
-                for (int k = 0; k < 3; ++k)
-                    accum[k] += samples[s][k] * scale;
-            }
-            
-            int n = (j * WIDTH + i) * 3;
-            for (int k = 0; k < 3; ++k) {
-                image[n + k] = fminf(accum[k] / SAMPLES, 1.0f);
+                        // Render the sample
+                        render_pixel(&ray, &objects, light_dir, samples[s], &seed);
+                        lum[s] = 0.2126f * samples[s][0] + 0.7152f * samples[s][1] + 0.0722f * samples[s][2];
+                    }
+
+                    memcpy(sorted, lum, (size_t)SAMPLES * sizeof(float));
+                    qsort(sorted, SAMPLES, sizeof(float), compare_floats);
+                    float median = sorted[SAMPLES / 2];
+
+                    // a sample is an outlier if its much brighter than the median
+                    const float OUTLIER_FACTOR = 4.0f;
+                    const float MIN_THRESHOLD = 1.0f;
+                    float threshold = fmaxf(OUTLIER_FACTOR * median, MIN_THRESHOLD);
+
+                    float accum[3] = {0.0f, 0.0f, 0.0f};
+                    for (int s = 0; s < SAMPLES; ++s) {
+                        // scale outliers down to the threshold, keeping their color
+                        float scale = (lum[s] > threshold) ? threshold / lum[s] : 1.0f;
+                        for (int k = 0; k < 3; ++k)
+                            accum[k] += samples[s][k] * scale;
+                    }
+                    
+                    int n = (j * WIDTH + i) * 3;
+                    for (int k = 0; k < 3; ++k) {
+                        image[n + k] = fminf(accum[k] / SAMPLES, 1.0f);
+                    }
+                }
             }
         }
+
+        free(sorted);
+        free(lum);
+        free(samples);
     }
 
     write_image(output_path, image);
 
-    free(light_dir);
-    free(right_one);
-    free(up);
+    free(image);
     return 0;
 }

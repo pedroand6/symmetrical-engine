@@ -3,17 +3,17 @@
 
 #include <stddef.h>
 
-float* vector_add(const float* a, const float* b, size_t size);
+void vector_add(const float* a, const float* b, size_t size, float* result);
 
-float* vector_subtract(const float* a, const float* b, size_t size);
+void vector_subtract(const float* a, const float* b, size_t size, float* result);
 
-float* vector_scale(const float* a, float scalar, size_t size);
+void vector_scale(const float* a, float scalar, size_t size, float* result);
 
 float vector_dot(const float* a, const float* b, size_t size);
 
 void vector_cross(const float* a, const float* b, float* result);
 
-float* vector_normalize(const float* a, size_t size);
+void vector_normalize(const float* a, size_t size, float* result);
 
 float vector_length(const float* a, size_t size);
 
